@@ -1,0 +1,45 @@
+{
+	"compiler": {
+		"version": "0.8.34+commit.80d5c536"
+	},
+	"language": "Solidity",
+	"output": {
+		"abi": [],
+		"devdoc": {
+			"kind": "dev",
+			"methods": {},
+			"version": 1
+		},
+		"userdoc": {
+			"kind": "user",
+			"methods": {},
+			"version": 1
+		}
+	},
+	"settings": {
+		"compilationTarget": {
+			"Escrow.sol": "SmartEscro"
+		},
+		"evmVersion": "osaka",
+		"libraries": {},
+		"metadata": {
+			"bytecodeHash": "ipfs"
+		},
+		"optimizer": {
+			"enabled": true,
+			"runs": 200
+		},
+		"remappings": []
+	},
+	"sources": {
+		"Escrow.sol": {
+			"keccak256": "0x428688eaa191fbabe9525316afef794beae231f28ee2ada7780fb6a5495fd38c",
+			"license": "UNLICENSED",
+			"urls": [
+				"bzz-raw://0c22e63ccf289881ee7e7e8bf3e73e623038332653e95e10ad1f893a28b66410",
+				"dweb:/ipfs/QmQsD7vVm8ndeUMmgfJwaSgBsUGvcgMLwgDkVNa1iXpHDT"
+			]
+		}
+	},
+	"version": 1
+}
