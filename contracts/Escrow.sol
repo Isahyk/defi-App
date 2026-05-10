@@ -2,7 +2,7 @@
 
 pragma solidity ^0.8.34;
 
-import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract SmartEscrow is ReentrancyGuard {
@@ -10,22 +10,22 @@ contract SmartEscrow is ReentrancyGuard {
     error NotBuyer();
     error NotSeller();
     error NotParticipant();
-    error invalidState();
+    error InvalidState();
     error ZeroAmount();
     error TransferFailed();
     error NotArbiter();
     error TooEarly();
 
-    enum Status {
+    enum State {
         AWAITING_FUNDS,
         AWAITING_DELIVERY,
         DISPUTED,
-        COMPLETED,
+        COMPLETED
         }
 
-        address public immutable Buyer;
-        address public immutable Seller;
-        IERC20 public immutable Token;
+        address public immutable buyer;
+        address public immutable seller;
+        IERC20 public immutable token;
 
         
 
@@ -44,11 +44,10 @@ contract SmartEscrow is ReentrancyGuard {
         //event declaration
 
     event Deposit(uint256 amount);
-    event disputeRaised();
+    event DisputeRaised();
     event Voted(address indexed arbiter, bool seller);
-    event DisputeRaised(bool mySeller);
-    event Resolved();
-    event Withdrawal(address indexed user,uint256 amount);
+    event Resolved(bool seller);
+    event Withdrawal(address indexed user, uint256 amount);
 
 // Modifiers
 
@@ -69,7 +68,7 @@ contract SmartEscrow is ReentrancyGuard {
 
     constructor(
             address _seller,
-            uint264 _duration,
+            uint256 _duration,
             address[] memory _arbiters,
             address _token 
             )
@@ -79,35 +78,35 @@ contract SmartEscrow is ReentrancyGuard {
         token = IERC20(_token);
         buyer = msg.sender;
         deadline = uint64(block.timestamp + _duration);
-        state = State.Awaiting_funds;
+        state = State.AWAITING_FUNDS;
     }
 
       // Depositting
-      function deposit(uint256 _amount) external onlyBuyer inState(State.Awaiting_funds){
+      function deposit(uint256 _amount) external payable onlyBuyer inState(State.AWAITING_FUNDS) {
         if (_amount == 0) revert ZeroAmount();
         amount = _amount;
-        state = State.Awaiting_delivery;
           if (address(token) == address(0)) {
             if (msg.value != _amount) revert TransferFailed();
         } else {
             bool ok = token.transferFrom(msg.sender, address(this), _amount);
             if (!ok) revert TransferFailed();
         }
-        state = State.Awaiting_delivery;
-        emit Deposit();
+        state = State.AWAITING_DELIVERY;
+        emit Deposit(_amount);
     }
-    function confirmDelivery(uint256 _dealId) external onlyBuyer inState(State.Awaiting_delivery) {
-        state = State.Complete;
+    function confirmDelivery() external onlyBuyer inState(State.AWAITING_DELIVERY) {
+        state = State.COMPLETED;
         pendingWithdrawals[seller] += amount;
+    }
     
     //Raise dispute
-    function raiseDispute() external isState(State.Awaiting_delivery){
+    function raiseDispute() external inState(State.AWAITING_DELIVERY) {
         if (msg.sender != buyer && msg.sender != seller) revert NotParticipant();
-        state = State.Disputed;
+        state = State.DISPUTED;
         emit DisputeRaised();
     }
      // Voting
-     function vote(bool _mySeller) external onlyArbiter() inState(State.Disputed) {
+     function vote(bool _mySeller) external onlyArbiter() inState(State.DISPUTED) {
         if (hasVoted[msg.sender]) revert AlreadyVoted();
         hasVoted[msg.sender] = true;
         if (_mySeller) {
@@ -122,18 +121,18 @@ contract SmartEscrow is ReentrancyGuard {
     function _checkResolution() internal {
         uint256 majority = (arbiters.length / 2) + 1;
         if (voteForSeller >= majority) {
-            state = State.Complete;
+            state = State.COMPLETED;
             pendingWithdrawals[seller] += amount;
             emit Resolved(true);
         } else if (voteForBuyer >= majority) {
-            state = State.Refunded;
+            state = State.REFUNDED;
             pendingWithdrawals[buyer] += amount;
             emit Resolved(false);
         }
            }
         // resolution 
         function resolve(bool mySeller) internal {
-            status = State.Complete;
+            state = State.COMPLETED;
             address winner = mySeller ? seller : buyer;
             pendingWithdrawals[winner] += amount;
             emit Resolved(mySeller);
@@ -143,7 +142,7 @@ contract SmartEscrow is ReentrancyGuard {
         if (block.timestamp < deadline) revert TooEarly();
         if (state != State.AWAITING_DELIVERY) revert InvalidState();
 
-        state = State.COMPLETE;
+        state = State.COMPLETED;
 
         // default → refund buyer
         pendingWithdrawals[buyer] += amount;
@@ -165,14 +164,14 @@ contract SmartEscrow is ReentrancyGuard {
             bool ok = token.transfer(msg.sender, bal);
             if (!ok) revert TransferFailed();
         }
-        emit Withdrawal(amount , bal);
+        emit Withdrawal(msg.sender, bal);
     }
     function _isArbiter(address user) internal view returns(bool){
-        for(uint i=0,i<arbiter.length,i++) {
+        for (uint256 i = 0; i < arbiters.length; i++) {
             if (arbiters[i] == user) return true;
         }
         return false;
     }
     }
-    }
+    
 
