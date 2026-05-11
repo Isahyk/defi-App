@@ -1,177 +1,246 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
 
-pragma solidity ^0.8.34;
-
-import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+
 
 contract SmartEscrow is ReentrancyGuard {
-    // Error declaration
-    error NotBuyer();
-    error NotSeller();
-    error NotParticipant();
-    error InvalidState();
-    error ZeroAmount();
-    error TransferFailed();
-    error NotArbiter();
-    error TooEarly();
+    using Address for address payable;
+    using SafeERC20 for IERC20;
 
-    enum State {
-        AWAITING_FUNDS,
-        AWAITING_DELIVERY,
+    enum Status {
+        AWAITING_DEPOSIT,
+        FUNDED,
         DISPUTED,
-        COMPLETED
-        }
+        RELEASED,
+        REFUNDED,
+        RESOLVED
+    }
 
-        address public immutable buyer;
-        address public immutable seller;
-        IERC20 public immutable token;
+    error Unauthorized();
+    error InvalidAddress();
+    error InvalidAmount();
+    error InvalidFeeBps();
+    error InvalidDeadline();
+    error InvalidState();
+    error EscrowExpired();
+    error EscrowNotExpired();
+    error DepositAlreadyMade();
+    error NativeValueMismatch();
+    error ZeroWithdrawableBalance();
+    error ResolutionExceedsDeposit();
+    error ArbiterRequired();
+    error UnsupportedDirectPayment();
+    error UnexpectedTokenAmount();
 
-        
+    event Deposited(address indexed buyer, uint256 amount);
+    event ReceiptConfirmed(address indexed buyer, uint256 sellerAmount, uint256 feeAmount);
+    event DisputeOpened(address indexed caller);
+    event DisputeResolved(
+        address indexed arbiter,
+        uint256 buyerAmount,
+        uint256 sellerAmount,
+        uint256 feeAmount
+    );
+    event Refunded(address indexed buyer, uint256 amount);
+    event Withdrawal(address indexed payee, uint256 amount);
 
-        uint128 public amount;
-        uint64 public deadline;
-        State public state;
+    address public immutable buyer;
+    address public immutable seller;
+    address public immutable arbiter;
+    address public immutable feeRecipient;
+    address public immutable asset;
 
-        // Mediator
-        address[] public arbiters;
-        uint8 public voteForSeller;
-        uint8 public voteForBuyer;
+    uint96 public immutable amount;
+    uint64 public immutable inspectionEnd;
+    uint16 public immutable feeBps;
 
-        mapping(address => bool) public hasVoted;
-        mapping(address => uint256) public pendingWithdrawals;
+    Status public status;
 
-        //event declaration
+    mapping(address => uint256) public pendingWithdrawals;
 
-    event Deposit(uint256 amount);
-    event DisputeRaised();
-    event Voted(address indexed arbiter, bool seller);
-    event Resolved(bool seller);
-    event Withdrawal(address indexed user, uint256 amount);
+    uint256 private constant _BPS_DENOMINATOR = 10_000;
 
-// Modifiers
+    modifier onlyBuyer() {
+        if (msg.sender != buyer) revert Unauthorized();
+        _;
+    }
 
-     modifier onlyBuyer() {
-        if (msg.sender != buyer) revert NotBuyer();
+    modifier onlySeller() {
+        if (msg.sender != seller) revert Unauthorized();
+        _;
+    }
+
+    modifier onlyParticipant() {
+        if (msg.sender != buyer && msg.sender != seller) revert Unauthorized();
         _;
     }
 
     modifier onlyArbiter() {
-        if (!_isArbiter(msg.sender)) revert NotArbiter();
-        _;
-    }
-
-    modifier inState(State s) {
-        if (state != s) revert InvalidState();
+        if (arbiter == address(0)) revert ArbiterRequired();
+        if (msg.sender != arbiter) revert Unauthorized();
         _;
     }
 
     constructor(
-            address _seller,
-            uint256 _duration,
-            address[] memory _arbiters,
-            address _token 
-            )
-       {
-        seller = _seller;
-        arbiters = _arbiters;
-        token = IERC20(_token);
-        buyer = msg.sender;
-        deadline = uint64(block.timestamp + _duration);
-        state = State.AWAITING_FUNDS;
+        address buyer_,
+        address seller_,
+        address arbiter_,
+        address feeRecipient_,
+        address asset_,
+        uint96 amount_,
+        uint64 inspectionEnd_,
+        uint16 feeBps_
+    ) {
+        if (buyer_ == address(0) || seller_ == address(0) || feeRecipient_ == address(0)) {
+            revert InvalidAddress();
+        }
+        if (buyer_ == seller_) revert InvalidAddress();
+        if (arbiter_ != address(0) && (arbiter_ == buyer_ || arbiter_ == seller_)) {
+            revert InvalidAddress();
+        }
+        if (amount_ == 0) revert InvalidAmount();
+        if (feeBps_ > _BPS_DENOMINATOR) revert InvalidFeeBps();
+        if (inspectionEnd_ <= block.timestamp) revert InvalidDeadline();
+
+        buyer = buyer_;
+        seller = seller_;
+        arbiter = arbiter_;
+        feeRecipient = feeRecipient_;
+        asset = asset_;
+        amount = amount_;
+        inspectionEnd = inspectionEnd_;
+        feeBps = feeBps_;
+        status = Status.AWAITING_DEPOSIT;
     }
 
-      // Depositting
-      function deposit(uint256 _amount) external payable onlyBuyer inState(State.AWAITING_FUNDS) {
-        if (_amount == 0) revert ZeroAmount();
-        amount = _amount;
-          if (address(token) == address(0)) {
-            if (msg.value != _amount) revert TransferFailed();
+    receive() external payable {
+        revert UnsupportedDirectPayment();
+    }
+
+    function deposit() external payable onlyBuyer nonReentrant {
+        if (status != Status.AWAITING_DEPOSIT) revert DepositAlreadyMade();
+
+        status = Status.FUNDED;
+
+        if (asset == address(0)) {
+            if (msg.value != amount) revert NativeValueMismatch();
         } else {
-            bool ok = token.transferFrom(msg.sender, address(this), _amount);
-            if (!ok) revert TransferFailed();
+            if (msg.value != 0) revert NativeValueMismatch();
+            IERC20 token = IERC20(asset);
+            uint256 balanceBefore = token.balanceOf(address(this));
+            token.safeTransferFrom(buyer, address(this), amount);
+            uint256 received = token.balanceOf(address(this)) - balanceBefore;
+            if (received != amount) revert UnexpectedTokenAmount();
         }
-        state = State.AWAITING_DELIVERY;
-        emit Deposit(_amount);
-    }
-    function confirmDelivery() external onlyBuyer inState(State.AWAITING_DELIVERY) {
-        state = State.COMPLETED;
-        pendingWithdrawals[seller] += amount;
-    }
-    
-    //Raise dispute
-    function raiseDispute() external inState(State.AWAITING_DELIVERY) {
-        if (msg.sender != buyer && msg.sender != seller) revert NotParticipant();
-        state = State.DISPUTED;
-        emit DisputeRaised();
-    }
-     // Voting
-     function vote(bool _mySeller) external onlyArbiter() inState(State.DISPUTED) {
-        if (hasVoted[msg.sender]) revert AlreadyVoted();
-        hasVoted[msg.sender] = true;
-        if (_mySeller) {
-            voteForSeller++;
-        } else {
-            voteForBuyer++;
-        }
-        emit Voted(msg.sender, _mySeller);
-        _checkResolution();
-    }
-    // check resolution
-    function _checkResolution() internal {
-        uint256 majority = (arbiters.length / 2) + 1;
-        if (voteForSeller >= majority) {
-            state = State.COMPLETED;
-            pendingWithdrawals[seller] += amount;
-            emit Resolved(true);
-        } else if (voteForBuyer >= majority) {
-            state = State.REFUNDED;
-            pendingWithdrawals[buyer] += amount;
-            emit Resolved(false);
-        }
-           }
-        // resolution 
-        function resolve(bool mySeller) internal {
-            state = State.COMPLETED;
-            address winner = mySeller ? seller : buyer;
-            pendingWithdrawals[winner] += amount;
-            emit Resolved(mySeller);
-            }
-             // Timeout
-    function resolveTimeout() external {
-        if (block.timestamp < deadline) revert TooEarly();
-        if (state != State.AWAITING_DELIVERY) revert InvalidState();
 
-        state = State.COMPLETED;
-
-        // default → refund buyer
-        pendingWithdrawals[buyer] += amount;
+        emit Deposited(buyer, amount);
     }
 
-    
-    // Withdraw (Pull Payment)
-    
+    function confirmReceipt() external onlyBuyer {
+        if (status != Status.FUNDED) revert InvalidState();
+        _releaseToSeller();
+    }
+
+    function openDispute() external onlyParticipant {
+        if (status != Status.FUNDED) revert InvalidState();
+        if (block.timestamp > inspectionEnd) revert EscrowExpired();
+        status = Status.DISPUTED;
+        emit DisputeOpened(msg.sender);
+    }
+
+    function sellerClaimAfterExpiry() external onlySeller {
+        if (status != Status.FUNDED) revert InvalidState();
+        if (block.timestamp <= inspectionEnd) revert EscrowNotExpired();
+        _releaseToSeller();
+    }
+
+    function resolveDispute(uint256 buyerAward) external onlyArbiter {
+        if (status != Status.DISPUTED) revert InvalidState();
+        if (buyerAward > amount) revert ResolutionExceedsDeposit();
+
+        status = Status.RESOLVED;
+
+        uint256 sellerGross = uint256(amount) - buyerAward;
+        uint256 feeAmount = (sellerGross * feeBps) / _BPS_DENOMINATOR;
+        uint256 sellerNet = sellerGross - feeAmount;
+
+        if (buyerAward != 0) {
+            pendingWithdrawals[buyer] += buyerAward;
+        }
+        if (sellerNet != 0) {
+            pendingWithdrawals[seller] += sellerNet;
+        }
+        if (feeAmount != 0) {
+            pendingWithdrawals[feeRecipient] += feeAmount;
+        }
+
+        emit DisputeResolved(msg.sender, buyerAward, sellerNet, feeAmount);
+    }
+
+    function refundBuyerBeforeDeposit() external onlyBuyer {
+        if (status != Status.AWAITING_DEPOSIT) revert InvalidState();
+        if (block.timestamp <= inspectionEnd) revert EscrowNotExpired();
+        status = Status.REFUNDED;
+        emit Refunded(buyer, 0);
+    }
+
     function withdraw() external nonReentrant {
-        uint256 bal = pendingWithdrawals[msg.sender];
-        if (bal == 0) revert ZeroAmount();
+        uint256 amountOwed = pendingWithdrawals[msg.sender];
+        if (amountOwed == 0) revert ZeroWithdrawableBalance();
 
         pendingWithdrawals[msg.sender] = 0;
 
-        if (address(token) == address(0)) {
-            (bool ok, ) = msg.sender.call{value: bal}("");
-            if (!ok) revert TransferFailed();
+        if (asset == address(0)) {
+            payable(msg.sender).sendValue(amountOwed);
         } else {
-            bool ok = token.transfer(msg.sender, bal);
-            if (!ok) revert TransferFailed();
+            IERC20(asset).safeTransfer(msg.sender, amountOwed);
         }
-        emit Withdrawal(msg.sender, bal);
-    }
-    function _isArbiter(address user) internal view returns(bool){
-        for (uint256 i = 0; i < arbiters.length; i++) {
-            if (arbiters[i] == user) return true;
-        }
-        return false;
-    }
-    }
-    
 
+        emit Withdrawal(msg.sender, amountOwed);
+    }
+
+    function feeOnFullAmount() external view returns (uint256) {
+        return (uint256(amount) * feeBps) / _BPS_DENOMINATOR;
+    }
+
+    function getSummary()
+        external
+        view
+        returns (
+            Status currentStatus,
+            address escrowAsset,
+            uint256 escrowAmount,
+            uint256 deadline,
+            uint256 sellerReceivesOnFullRelease,
+            uint256 feeOnFullRelease
+        )
+    {
+        uint256 feeAmount = (uint256(amount) * feeBps) / _BPS_DENOMINATOR;
+        return (
+            status,
+            asset,
+            amount,
+            inspectionEnd,
+            uint256(amount) - feeAmount,
+            feeAmount
+        );
+    }
+
+    function _releaseToSeller() internal {
+        status = Status.RELEASED;
+
+        uint256 feeAmount = (uint256(amount) * feeBps) / _BPS_DENOMINATOR;
+        uint256 sellerNet = uint256(amount) - feeAmount;
+
+        pendingWithdrawals[seller] += sellerNet;
+        if (feeAmount != 0) {
+            pendingWithdrawals[feeRecipient] += feeAmount;
+        }
+
+        emit ReceiptConfirmed(buyer, sellerNet, feeAmount);
+    }
+}
