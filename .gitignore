@@ -41,6 +41,10 @@ build/Release
 node_modules/
 jspm_packages/
 
+# Hardhat generated files
+artifacts/
+cache/
+
 # Snowpack dependency directory (https://snowpack.dev/)
 web_modules/
 
@@ -141,3 +145,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Remix-generated files
+contracts/.deps/
+contracts/artifacts/

@@ -3,19 +3,32 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
-  "directories": {
-    "test": "tests"
-  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "compile": "hardhat compile",
+    "clean": "hardhat clean",
+    "deposit": "hardhat run scripts/deposit.ts",
+    "deposit:local": "hardhat run scripts/deposit.ts --network localhost",
+    "deploy": "hardhat run scripts/deploy.ts",
+    "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
+    "confirm": "hardhat run scripts/confirmReceipt.ts",
+    "confirm:local": "hardhat run scripts/confirmReceipt.ts --network localhost",
+    "node": "hardhat node",
+    "seller-claim": "hardhat run scripts/sellerClaimAfterExpiry.ts",
+    "seller-claim:local": "hardhat run scripts/sellerClaimAfterExpiry.ts --network localhost",
+    "test": "hardhat test"
+    ,
+    "withdraw": "hardhat run scripts/withdraw.ts",
+    "withdraw:local": "hardhat run scripts/withdraw.ts --network localhost"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "@types/node": "^22.19.18",
+    "@nomicfoundation/hardhat-ethers": "^4.0.11",
+    "@types/node": "^22.19.19",
+    "ethers": "^6.16.0",
     "hardhat": "^3.4.2",
-    "typescript": "~5.8.0"
+    "typescript": "^6.0.3"
   },
   "type": "module",
   "dependencies": {

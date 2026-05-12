@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.24;
 
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-
 
 contract SmartEscrow is ReentrancyGuard {
     using Address for address payable;
@@ -48,6 +47,8 @@ contract SmartEscrow is ReentrancyGuard {
     event Refunded(address indexed buyer, uint256 amount);
     event Withdrawal(address indexed payee, uint256 amount);
 
+    uint256 private constant BPS_DENOMINATOR = 10_000;
+
     address public immutable buyer;
     address public immutable seller;
     address public immutable arbiter;
@@ -61,8 +62,6 @@ contract SmartEscrow is ReentrancyGuard {
     Status public status;
 
     mapping(address => uint256) public pendingWithdrawals;
-
-    uint256 private constant _BPS_DENOMINATOR = 10_000;
 
     modifier onlyBuyer() {
         if (msg.sender != buyer) revert Unauthorized();
@@ -103,7 +102,7 @@ contract SmartEscrow is ReentrancyGuard {
             revert InvalidAddress();
         }
         if (amount_ == 0) revert InvalidAmount();
-        if (feeBps_ > _BPS_DENOMINATOR) revert InvalidFeeBps();
+        if (feeBps_ > BPS_DENOMINATOR) revert InvalidFeeBps();
         if (inspectionEnd_ <= block.timestamp) revert InvalidDeadline();
 
         buyer = buyer_;
@@ -124,30 +123,33 @@ contract SmartEscrow is ReentrancyGuard {
     function deposit() external payable onlyBuyer nonReentrant {
         if (status != Status.AWAITING_DEPOSIT) revert DepositAlreadyMade();
 
-        status = Status.FUNDED;
-
         if (asset == address(0)) {
             if (msg.value != amount) revert NativeValueMismatch();
         } else {
             if (msg.value != 0) revert NativeValueMismatch();
+
             IERC20 token = IERC20(asset);
             uint256 balanceBefore = token.balanceOf(address(this));
-            token.safeTransferFrom(buyer, address(this), amount);
+            token.safeTransferFrom(msg.sender, address(this), amount);
             uint256 received = token.balanceOf(address(this)) - balanceBefore;
+
             if (received != amount) revert UnexpectedTokenAmount();
         }
 
-        emit Deposited(buyer, amount);
+        status = Status.FUNDED;
+        emit Deposited(msg.sender, amount);
     }
 
     function confirmReceipt() external onlyBuyer {
         if (status != Status.FUNDED) revert InvalidState();
-        _releaseToSeller();
+        _creditSellerForFullRelease();
     }
 
     function openDispute() external onlyParticipant {
         if (status != Status.FUNDED) revert InvalidState();
+        if (arbiter == address(0)) revert ArbiterRequired();
         if (block.timestamp > inspectionEnd) revert EscrowExpired();
+
         status = Status.DISPUTED;
         emit DisputeOpened(msg.sender);
     }
@@ -155,7 +157,16 @@ contract SmartEscrow is ReentrancyGuard {
     function sellerClaimAfterExpiry() external onlySeller {
         if (status != Status.FUNDED) revert InvalidState();
         if (block.timestamp <= inspectionEnd) revert EscrowNotExpired();
-        _releaseToSeller();
+
+        _creditSellerForFullRelease();
+    }
+
+    function refundBuyerBeforeDeposit() external onlyBuyer {
+        if (status != Status.AWAITING_DEPOSIT) revert InvalidState();
+        if (block.timestamp <= inspectionEnd) revert EscrowNotExpired();
+
+        status = Status.REFUNDED;
+        emit Refunded(buyer, 0);
     }
 
     function resolveDispute(uint256 buyerAward) external onlyArbiter {
@@ -165,7 +176,7 @@ contract SmartEscrow is ReentrancyGuard {
         status = Status.RESOLVED;
 
         uint256 sellerGross = uint256(amount) - buyerAward;
-        uint256 feeAmount = (sellerGross * feeBps) / _BPS_DENOMINATOR;
+        uint256 feeAmount = (sellerGross * feeBps) / BPS_DENOMINATOR;
         uint256 sellerNet = sellerGross - feeAmount;
 
         if (buyerAward != 0) {
@@ -179,13 +190,6 @@ contract SmartEscrow is ReentrancyGuard {
         }
 
         emit DisputeResolved(msg.sender, buyerAward, sellerNet, feeAmount);
-    }
-
-    function refundBuyerBeforeDeposit() external onlyBuyer {
-        if (status != Status.AWAITING_DEPOSIT) revert InvalidState();
-        if (block.timestamp <= inspectionEnd) revert EscrowNotExpired();
-        status = Status.REFUNDED;
-        emit Refunded(buyer, 0);
     }
 
     function withdraw() external nonReentrant {
@@ -204,7 +208,7 @@ contract SmartEscrow is ReentrancyGuard {
     }
 
     function feeOnFullAmount() external view returns (uint256) {
-        return (uint256(amount) * feeBps) / _BPS_DENOMINATOR;
+        return (uint256(amount) * feeBps) / BPS_DENOMINATOR;
     }
 
     function getSummary()
@@ -219,7 +223,8 @@ contract SmartEscrow is ReentrancyGuard {
             uint256 feeOnFullRelease
         )
     {
-        uint256 feeAmount = (uint256(amount) * feeBps) / _BPS_DENOMINATOR;
+        uint256 feeAmount = (uint256(amount) * feeBps) / BPS_DENOMINATOR;
+
         return (
             status,
             asset,
@@ -230,10 +235,10 @@ contract SmartEscrow is ReentrancyGuard {
         );
     }
 
-    function _releaseToSeller() internal {
+    function _creditSellerForFullRelease() internal {
         status = Status.RELEASED;
 
-        uint256 feeAmount = (uint256(amount) * feeBps) / _BPS_DENOMINATOR;
+        uint256 feeAmount = (uint256(amount) * feeBps) / BPS_DENOMINATOR;
         uint256 sellerNet = uint256(amount) - feeAmount;
 
         pendingWithdrawals[seller] += sellerNet;
