@@ -79,11 +79,15 @@ export async function getEscrowContext() {
 
   const { ethers } = await network.connect();
   const escrowAddress = readAddress("ESCROW_ADDRESS", "0x5FbDB2315678afecb367f032d93F642f64180aa3");
-  const buyer = readAddress("BUYER");
-  const seller = readAddress("SELLER");
-  const feeRecipient = readAddress("FEE_RECIPIENT", ZERO_ADDRESS);
-
   const escrow = await ethers.getContractAt("SmartEscrow", escrowAddress);
+  const [contractBuyer, contractSeller, contractFeeRecipient] = await Promise.all([
+    escrow.buyer(),
+    escrow.seller(),
+    escrow.feeRecipient(),
+  ]);
+  const buyer = loadedEnv.get("BUYER") ?? contractBuyer;
+  const seller = loadedEnv.get("SELLER") ?? contractSeller;
+  const feeRecipient = loadedEnv.get("FEE_RECIPIENT") ?? contractFeeRecipient ?? ZERO_ADDRESS;
   const signers = await ethers.getSigners();
 
   async function getSignerByAddress(label: string, address: string) {
